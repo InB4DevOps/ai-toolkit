@@ -11,6 +11,7 @@ import { SelectInput } from '@/components/formInputs';
 import useSettings from '@/hooks/useSettings';
 import useGPUInfo from '@/hooks/useGPUInfo';
 import useDatasetList from '@/hooks/useDatasetList';
+import useDatasetCounts from '@/hooks/useDatasetCounts';
 import YAML from 'yaml';
 import path from 'path';
 import { TopBar, MainContent } from '@/components/layout';
@@ -20,6 +21,7 @@ import SimpleJob from './SimpleJob';
 import AdvancedConfigEditor from '@/components/AdvancedConfigEditor';
 import ErrorBoundary from '@/components/ErrorBoundary';
 import { apiClient } from '@/utils/api';
+import type { MediaCounts } from '@/server/mediaFiles';
 
 const isDev = process.env.NODE_ENV === 'development';
 
@@ -32,7 +34,9 @@ export default function TrainingForm() {
   const { settings, isSettingsLoaded } = useSettings();
   const { gpuList, isGPUInfoLoaded } = useGPUInfo();
   const { datasets, status: datasetFetchStatus } = useDatasetList();
+  const { counts: datasetCounts, status: countsFetchStatus } = useDatasetCounts();
   const [datasetOptions, setDatasetOptions] = useState<{ value: string; label: string }[]>([]);
+  const [datasetImageCounts, setDatasetImageCounts] = useState<Record<string, MediaCounts>>({});
   const [showAdvancedView, setShowAdvancedView] = useState(false);
 
   const [jobConfig, setJobConfig] = useNestedState<JobConfig>(objectCopy(migrateJobConfig(defaultJobConfig)));
@@ -102,6 +106,17 @@ export default function TrainingForm() {
       });
     }
   }, [datasets, settings, isSettingsLoaded, datasetFetchStatus]);
+
+  // Map dataset image counts by absolute folder path (the same key used for
+  // datasetOptions values) so SimpleJob can look up a count per dataset entry.
+  useEffect(() => {
+    if (!isSettingsLoaded || countsFetchStatus !== 'success') return;
+    const byPath: Record<string, MediaCounts> = {};
+    for (const [name, count] of Object.entries(datasetCounts)) {
+      byPath[path.join(settings.DATASETS_FOLDER, name)] = count;
+    }
+    setDatasetImageCounts(byPath);
+  }, [datasetCounts, settings, isSettingsLoaded, countsFetchStatus]);
 
   // clone existing job
   useEffect(() => {
@@ -324,6 +339,7 @@ export default function TrainingForm() {
               setGpuIDs={setGpuIDs}
               gpuList={gpuList}
               datasetOptions={datasetOptions}
+              datasetImageCounts={datasetImageCounts}
               isLoading={!isSettingsLoaded || !isGPUInfoLoaded || datasetFetchStatus !== 'success'}
             />
           </ErrorBoundary>
