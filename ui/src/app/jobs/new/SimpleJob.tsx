@@ -44,7 +44,7 @@ type Props = {
   setGpuIDs: (value: string | null) => void;
   gpuList: any;
   datasetOptions: any;
-  datasetImageCounts: Record<string, MediaCounts>;
+  datasetMediaCounts: Record<string, MediaCounts>;
   isLoading?: boolean;
 };
 
@@ -63,7 +63,7 @@ export default function SimpleJob({
   setGpuIDs,
   gpuList,
   datasetOptions,
-  datasetImageCounts,
+  datasetMediaCounts,
   isLoading,
 }: Props) {
   const { archs: modelArchs, groupedModelOptions } = useModelArchs();
@@ -86,14 +86,14 @@ export default function SimpleJob({
     return sections;
   }, [modelArch, jobType]);
 
-  // Per-dataset share of the total training images. A dataset contributes
-  // (mediaCount x num_repeats) effective images; the label shows each dataset's
+  // Per-dataset share of the total training samples. A dataset contributes
+  // (mediaCount x num_repeats) effective samples; the label shows each dataset's
   // percentage of the combined total, recomputed whenever repeats or the dataset
   // list changes.
   const datasetStats = useMemo(() => {
     const datasets = jobConfig.config.process[0].datasets;
     const mediaCount = (datasetPath: string) => {
-      const counts = datasetImageCounts[datasetPath];
+      const counts = datasetMediaCounts[datasetPath];
       if (!counts) return 0;
       if (modelArch?.group === 'audio') return counts.audio;
       if (modelArch?.group === 'video') return counts.image + counts.video;
@@ -116,7 +116,7 @@ export default function SimpleJob({
     return datasets.map((dataset, i) => {
       const total = totals[dataset.is_reg ? 'regularization' : 'training'];
       return {
-        available: datasetImageCounts[dataset.folder_path] !== undefined,
+        available: datasetMediaCounts[dataset.folder_path] !== undefined,
         count: mediaCount(dataset.folder_path),
         repeats: dataset.num_repeats || 1,
         effective: effective[i],
@@ -124,7 +124,7 @@ export default function SimpleJob({
         pool: dataset.is_reg ? 'regularization' : 'training',
       };
     });
-  }, [jobConfig.config.process[0].datasets, datasetImageCounts, modelArch?.group]);
+  }, [jobConfig.config.process[0].datasets, datasetMediaCounts, modelArch?.group]);
 
   const isVideoModel = !!(modelArch?.group === 'video');
   const isAudioModel = !!(modelArch?.group === 'audio');
@@ -1255,7 +1255,7 @@ export default function SimpleJob({
                   {jobConfig.config.process[0].datasets.length > 1 && (
                     <div className="text-sm text-gray-400 mb-2">
                       {datasetStats[i].available
-                        ? `${datasetStats[i].percent.toFixed(0)}% of ${datasetStats[i].pool} images`
+                        ? `${datasetStats[i].percent.toFixed(0)}% of ${datasetStats[i].pool} samples`
                         : 'Dataset share unavailable'}
                       {datasetStats[i].available &&
                         datasetStats[i].repeats !== 1 &&
