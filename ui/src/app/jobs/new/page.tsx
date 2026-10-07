@@ -35,7 +35,7 @@ export default function TrainingForm() {
   const { datasets, status: datasetFetchStatus } = useDatasetList();
   const { counts: datasetCounts, status: countsFetchStatus } = useDatasetCounts();
   const [datasetOptions, setDatasetOptions] = useState<{ value: string; label: string }[]>([]);
-  const [datasetImageCounts, setDatasetImageCounts] = useState<Record<string, number>>({});
+  const [datasetMediaCounts, setDatasetMediaCounts] = useState<Record<string, number>>({});
   const [showAdvancedView, setShowAdvancedView] = useState(false);
 
   const [jobConfig, setJobConfig] = useNestedState<JobConfig>(objectCopy(migrateJobConfig(defaultJobConfig)));
@@ -106,7 +106,7 @@ export default function TrainingForm() {
     }
   }, [datasets, settings, isSettingsLoaded, datasetFetchStatus]);
 
-  // Map dataset image counts by absolute folder path (the same key used for
+  // Map dataset media counts by absolute folder path (the same key used for
   // datasetOptions values) so SimpleJob can look up a count per dataset entry.
   useEffect(() => {
     if (!isSettingsLoaded || countsFetchStatus !== 'success') return;
@@ -114,7 +114,7 @@ export default function TrainingForm() {
     for (const [name, count] of Object.entries(datasetCounts)) {
       byPath[path.join(settings.DATASETS_FOLDER, name)] = count;
     }
-    setDatasetImageCounts(byPath);
+    setDatasetMediaCounts(byPath);
   }, [datasetCounts, settings, isSettingsLoaded, countsFetchStatus]);
 
   // clone existing job
@@ -338,7 +338,7 @@ export default function TrainingForm() {
               setGpuIDs={setGpuIDs}
               gpuList={gpuList}
               datasetOptions={datasetOptions}
-              datasetImageCounts={datasetImageCounts}
+              datasetMediaCounts={datasetMediaCounts}
               isLoading={!isSettingsLoaded || !isGPUInfoLoaded || datasetFetchStatus !== 'success' || countsFetchStatus !== 'success'}
             />
           </ErrorBoundary>

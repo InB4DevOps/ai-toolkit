@@ -43,7 +43,7 @@ type Props = {
   setGpuIDs: (value: string | null) => void;
   gpuList: any;
   datasetOptions: any;
-  datasetImageCounts: Record<string, number>;
+  datasetMediaCounts: Record<string, number>;
   isLoading?: boolean;
 };
 
@@ -59,7 +59,7 @@ export default function SimpleJob({
   setGpuIDs,
   gpuList,
   datasetOptions,
-  datasetImageCounts,
+  datasetMediaCounts,
   isLoading,
 }: Props) {
   const { archs: modelArchs, groupedModelOptions } = useModelArchs();
@@ -82,27 +82,27 @@ export default function SimpleJob({
     return sections;
   }, [modelArch, jobType]);
 
-  // Per-dataset share of the total training images. A dataset contributes
-  // (mediaCount x num_repeats) effective images; the label shows each dataset's
+  // Per-dataset share of the total training samples. A dataset contributes
+  // (mediaCount x num_repeats) effective samples; the label shows each dataset's
   // percentage of the combined total, recomputed whenever repeats or the dataset
   // list changes.
   const datasetStats = useMemo(() => {
     const datasets = jobConfig.config.process[0].datasets;
     const effective = datasets.map(dataset => {
-      const count = datasetImageCounts[dataset.folder_path] ?? 0;
+      const count = datasetMediaCounts[dataset.folder_path] ?? 0;
       const repeats = dataset.num_repeats || 1;
       return count * repeats;
     });
     const total = effective.reduce((sum, value) => sum + value, 0);
     return datasets.map((dataset, i) => {
       return {
-        count: datasetImageCounts[dataset.folder_path] ?? 0,
+        count: datasetMediaCounts[dataset.folder_path] ?? 0,
         repeats: dataset.num_repeats || 1,
         effective: effective[i],
         percent: total > 0 ? (effective[i] / total) * 100 : 0,
       };
     });
-  }, [jobConfig.config.process[0].datasets, datasetImageCounts]);
+  }, [jobConfig.config.process[0].datasets, datasetMediaCounts]);
 
   const isVideoModel = !!(modelArch?.group === 'video');
   const isAudioModel = !!(modelArch?.group === 'audio');
@@ -1221,7 +1221,7 @@ export default function SimpleJob({
                   <h2 className="text-lg font-bold mb-4">Dataset {i + 1}</h2>
                   {jobConfig.config.process[0].datasets.length > 1 && (
                     <div className="text-sm text-gray-400 mb-2">
-                      {datasetStats[i].percent.toFixed(0)}% of total training images
+                      {datasetStats[i].percent.toFixed(0)}% of total training samples
                       {datasetStats[i].repeats !== 1 && ` (×${datasetStats[i].repeats} repeats)`}
                     </div>
                   )}
