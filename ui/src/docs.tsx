@@ -407,6 +407,27 @@ const docs: { [key: string]: ConfigDoc } = {
       </>
     ),
   },
+  'save.save_every_epoch': {
+    title: 'Save Every Epoch',
+    description: (
+      <>
+        Saves a checkpoint after the repeat-weighted number of successful non-regularization training uses has
+        contributed to optimizer updates. For example, 40 files with 3 repeats produce an epoch size of 120 successful
+        uses.
+        <br />
+        <br />
+        Duplicate dataset entries add to the total. Resolution and flip variants do not increase it. Any eligible source
+        can contribute toward the counter, so shuffle or replacement can use some sources more often than others. Extra
+        successful uses carry into the next epoch, so the next epoch&apos;s progress can begin above zero. Regularization
+        files are excluded.
+        <br />
+        <br />
+        With gradient accumulation, coverage and saving wait for the optimizer update. Failed or out-of-memory updates
+        do not count, while successfully trained replacement media do count. Batching means an epoch does not necessarily
+        match the same number of training steps. Progress resets when training starts or resumes.
+      </>
+    ),
+  },
   'config.process[0].caption.caption_prompt': {
     title: 'Caption Prompt',
     description: (

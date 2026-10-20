@@ -33,6 +33,7 @@ from toolkit.data_transfer_object.data_loader import FileItemDTO, DataLoaderBatc
 from toolkit.ema import ExponentialMovingAverage
 from toolkit.embedding import Embedding
 from toolkit.image_utils import show_tensors, show_latents, reduce_contrast
+from toolkit.image_coverage import ImageCoverageTracker, get_repeat_weighted_source_paths
 from toolkit.ip_adapter import IPAdapter
 from toolkit.lora_special import LoRASpecialNetwork
 from toolkit.lorm import convert_diffusers_unet_to_lorm, count_parameters, print_lorm_extract_details, \
@@ -69,6 +70,7 @@ from diffusers import FluxTransformer2DModel
 from toolkit.accelerator import get_accelerator, unwrap_model
 from toolkit.print import print_acc
 from accelerate import Accelerator
+from accelerate.utils import gather_object
 import transformers
 import diffusers
 import hashlib
@@ -143,6 +145,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
         self.is_latents_cached = True
         raw_datasets = self.get_conf('datasets', None)
         if raw_datasets is not None and len(raw_datasets) > 0:
+            for coverage_group_id, raw_dataset in enumerate(raw_datasets):
+                raw_dataset['_coverage_group_id'] = coverage_group_id
             raw_datasets = preprocess_dataset_raw_config(raw_datasets)
         self.datasets = None
         self.datasets_reg = None
@@ -2516,6 +2520,12 @@ class BaseSDTrainProcess(BaseTrainProcess):
             dataloader_reg = None
             dataloader_iterator_reg = None
 
+        image_coverage = None
+        if self.save_config.save_every_epoch and dataloader is not None:
+            source_paths = get_repeat_weighted_source_paths(dataloader.dataset.datasets)
+            image_coverage = ImageCoverageTracker(source_paths)
+        normal_batches_in_epoch = 0
+
         # zero any gradients
         optimizer.zero_grad()
 
@@ -2541,6 +2551,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
         did_first_flush = False
         flush_next = False
         for step in range(start_step_num, self.train_config.steps):
+            coverage_progress = image_coverage.covered if image_coverage is not None else 0
             if self.train_config.do_paramiter_swapping:
                 self.optimizer.optimizer.swap_paramiters()
             self.timer.start('train_loop')
@@ -2561,7 +2572,11 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 # if is even step and we have a reg dataset, use that
                 # todo improve this logic to send one of each through if we can buckets and batch size might be an issue
                 is_reg_step = False
-                is_save_step = self.save_config.save_every and self.step_num % self.save_config.save_every == 0
+                is_save_step = (
+                    (not self.save_config.save_every_epoch or image_coverage is None)
+                    and self.save_config.save_every
+                    and self.step_num % self.save_config.save_every == 0
+                )
                 is_sample_step = (
                     self.sample_config.sample_every
                     and self.step_num >= self.sample_config.sample_start_step
@@ -2599,12 +2614,15 @@ class BaseSDTrainProcess(BaseTrainProcess):
                                 dataloader_iterator = iter(dataloader)
                                 trigger_dataloader_setup_epoch(dataloader)
                                 self.epoch_num += 1
-                                if self.train_config.gradient_accumulation_steps == -1:
-                                    # if we are accumulating for an entire epoch, trigger a step
-                                    self.is_grad_accumulation_step = False
-                                    self.grad_accumulation_step = 0
                             with self.timer('get_batch'):
                                 batch = next(dataloader_iterator)
+                        if self.train_config.gradient_accumulation_steps == -1:
+                            normal_batches_in_epoch += 1
+                            if normal_batches_in_epoch >= len(dataloader):
+                                # Commit the final batch in this loader epoch, not the first in the next one.
+                                self.is_grad_accumulation_step = False
+                                self.grad_accumulation_step = 0
+                                normal_batches_in_epoch = 0
                     else:
                         batch = None
                     batch_list.append(batch)
@@ -2641,13 +2659,64 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 else:
                     raise  # not an OOM; surface real errors
             if did_oom:
-                self.num_consecutive_oom += 1
-                if self.num_consecutive_oom > 3:
-                    raise RuntimeError("OOM during training step 3 times in a row, aborting training")
                 optimizer.zero_grad(set_to_none=True)
                 flush()
                 torch.cuda.ipc_collect()
-                # skip this step and keep going
+
+            if image_coverage is not None:
+                trained_paths = []
+                optimizer_step_skipped = (
+                    not did_oom
+                    and loss_dict is not None
+                    and not self.is_grad_accumulation_step
+                    and getattr(self.accelerator, 'optimizer_step_was_skipped', False)
+                )
+                step_succeeded = not did_oom and loss_dict is not None and not optimizer_step_skipped
+                hard_step_failure = not step_succeeded and not optimizer_step_skipped
+                if step_succeeded and not is_reg_step:
+                    trained_paths = [
+                        item.path
+                        for current_batch in batch_list
+                        if isinstance(current_batch, DataLoaderBatchDTO)
+                        for item in current_batch.file_items
+                    ]
+                if self.accelerator.num_processes > 1:
+                    process_updates = gather_object([(step_succeeded, optimizer_step_skipped, trained_paths)])
+                    step_succeeded = all(success for success, _, _ in process_updates)
+                    skip_results = [skipped for _, skipped, _ in process_updates]
+                    mixed_optimizer_result = any(skip_results) and not all(skip_results)
+                    optimizer_step_skipped = all(skip_results)
+                    hard_step_failure = any(
+                        not success and not skipped
+                        for success, skipped, _ in process_updates
+                    ) or mixed_optimizer_result
+                    trained_paths = [
+                        path
+                        for success, _, process_paths in process_updates
+                        if success
+                        for path in process_paths
+                    ]
+                if step_succeeded:
+                    image_coverage.stage(trained_paths)
+                    if not self.is_grad_accumulation_step:
+                        coverage_update = image_coverage.commit_pending()
+                        coverage_progress = coverage_update.covered
+                        if coverage_update.completed_epochs:
+                            coverage_progress = image_coverage.total
+                            is_save_step = True
+                else:
+                    image_coverage.discard_pending()
+                    optimizer.zero_grad(set_to_none=True)
+                    if self.accelerator.num_processes > 1 and hard_step_failure:
+                        raise RuntimeError(
+                            "Training step failed on at least one process; aborting to avoid desynchronized weights"
+                        )
+            if did_oom:
+                self.grad_accumulation_step = 0
+                normal_batches_in_epoch = 0
+                self.num_consecutive_oom += 1
+                if self.num_consecutive_oom > 3:
+                    raise RuntimeError("OOM during training step 3 times in a row, aborting training")
                 print_acc("")
                 print_acc("################################################")
                 print_acc(f"# OOM during training step, skipping batch {self.num_consecutive_oom}/3 #")
@@ -2703,6 +2772,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     prog_bar_string = f"lr: {learning_rate:.1e}"
                     for key, value in loss_dict.items():
                         prog_bar_string += f" {key}: {value:.3e}"
+                    if image_coverage is not None:
+                        prog_bar_string += f" epoch progress: {coverage_progress}/{image_coverage.total}"
 
                     if self.progress_bar is not None:
                         self.progress_bar.set_postfix_str(prog_bar_string)
@@ -2712,26 +2783,29 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     with self.timer('batch_cleanup'):
                         batch.cleanup()
 
-                # don't do on first step
-                if self.step_num != self.start_step:
-                    if is_sample_step or is_save_step:
-                        self.accelerator.wait_for_everyone()
-                        
-                    if is_save_step:
-                        self.accelerator
-                        # print above the progress bar
-                        if self.progress_bar is not None:
-                            self.progress_bar.pause()
-                        print_acc(f"\nSaving at step {self.step_num}")
-                        self.save(self.step_num)
-                        self.ensure_params_requires_grad()
-                        # clear any grads
-                        optimizer.zero_grad()
-                        flush()
-                        flush_next = True
-                        if self.progress_bar is not None:
-                            self.progress_bar.unpause()
-                            
+                can_run_periodic_actions = self.step_num != self.start_step
+                should_save_step = is_save_step and (
+                    can_run_periodic_actions or self.save_config.save_every_epoch
+                )
+                if should_save_step or (can_run_periodic_actions and is_sample_step):
+                    self.accelerator.wait_for_everyone()
+
+                if should_save_step:
+                    # print above the progress bar
+                    if self.progress_bar is not None:
+                        self.progress_bar.pause()
+                    print_acc(f"\nSaving at step {self.step_num}")
+                    self.save(self.step_num)
+                    self.ensure_params_requires_grad()
+                    # clear any grads
+                    optimizer.zero_grad()
+                    flush()
+                    flush_next = True
+                    if self.progress_bar is not None:
+                        self.progress_bar.unpause()
+
+                # Other periodic actions intentionally skip the first step.
+                if can_run_periodic_actions:
                     if is_sample_step:
                         if self.progress_bar is not None:
                             self.progress_bar.pause()

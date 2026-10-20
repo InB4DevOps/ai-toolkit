@@ -23,6 +23,7 @@ else:
 class SaveConfig:
     def __init__(self, **kwargs):
         self.save_every: int = kwargs.get('save_every', 1000)
+        self.save_every_epoch: bool = kwargs.get('save_every_epoch', False)
         self.dtype: str = kwargs.get('dtype', 'float16')
         self.max_step_saves_to_keep: int = kwargs.get('max_step_saves_to_keep', 5)
         self.save_format: SaveFormat = kwargs.get('save_format', 'safetensors')
@@ -930,6 +931,8 @@ class DatasetConfig:
         self.folder_path: str = kwargs.get('folder_path', None)
         # can be json or folder path
         self.dataset_path: str = kwargs.get('dataset_path', None)
+        # Identifies one user-configured dataset after path/resolution preprocessing splits it.
+        self.coverage_group_id = kwargs.get('_coverage_group_id', None)
 
         self.default_caption: str = kwargs.get('default_caption', None)
         # trigger word for just this dataset

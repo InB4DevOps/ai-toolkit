@@ -152,12 +152,13 @@ export interface NumberInputProps extends InputProps {
   onChange: (value: number | null) => void;
   min?: number;
   max?: number;
+  disabled?: boolean;
   // when true, clearing the input calls onChange(null) instead of being ignored
   allowEmpty?: boolean;
 }
 
 export const NumberInput = (props: NumberInputProps) => {
-  const { label, value, onChange, placeholder, required, min, max, allowEmpty, docKey = null } = props;
+  const { label, value, onChange, placeholder, required, min, max, disabled, allowEmpty, docKey = null } = props;
   let { doc } = props;
   if (!doc && docKey) {
     doc = getDoc(docKey);
@@ -172,7 +173,7 @@ export const NumberInput = (props: NumberInputProps) => {
   }, [value]);
 
   return (
-    <div className={classNames(props.className)}>
+    <div className={classNames(props.className, disabled && 'opacity-30 cursor-not-allowed')}>
       {label && (
         <label className={labelClasses}>
           {label}{' '}
@@ -231,6 +232,7 @@ export const NumberInput = (props: NumberInputProps) => {
         required={required}
         min={min}
         max={max}
+        disabled={disabled}
         step="any"
       />
     </div>

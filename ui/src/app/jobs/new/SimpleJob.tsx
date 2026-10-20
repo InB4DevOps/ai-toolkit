@@ -9,7 +9,7 @@ import {
 } from './options';
 import { useModelArchs } from '@/extensions/modelArchs';
 import { defaultCompileOptions, defaultDatasetConfig } from './jobConfig';
-import { GroupedSelectOption, JobConfig, SelectOption } from '@/types';
+import { DatasetConfig, GroupedSelectOption, JobConfig, SelectOption } from '@/types';
 import { objectCopy, tagsToObj, objToTags } from '@/utils/basic';
 import {
   TextInput,
@@ -53,6 +53,25 @@ const isDev = process.env.NODE_ENV === 'development';
 const getResolutionMultiplier = (resolution: number | number[]) =>
   Array.isArray(resolution) ? resolution.length : 1;
 
+const getRepeatCount = (dataset: DatasetConfig) => Math.max(1, dataset.num_repeats || 1);
+
+const datasetUsesVideo = (dataset: DatasetConfig, datasets: DatasetConfig[], poolDatasets: boolean) =>
+  dataset.num_frames > 1 ||
+  !!dataset.auto_frame_count ||
+  (poolDatasets &&
+    datasets.some(
+      candidate =>
+        candidate.is_reg === dataset.is_reg && (candidate.num_frames > 1 || !!candidate.auto_frame_count),
+    ));
+
+const getMediaCount = (counts: MediaCounts | undefined, modelGroup?: string, includeVideo = false) => {
+  if (!counts) return 0;
+  if (modelGroup === 'audio') return counts.audio;
+  if (modelGroup === 'video') return counts.image + (includeVideo ? counts.video : 0);
+  if (modelGroup === 'llm') return counts.image + counts.audio + (includeVideo ? counts.video : 0);
+  return counts.image;
+};
+
 export default function SimpleJob({
   jobConfig,
   setJobConfig,
@@ -92,17 +111,14 @@ export default function SimpleJob({
   // list changes.
   const datasetStats = useMemo(() => {
     const datasets = jobConfig.config.process[0].datasets;
-    const mediaCount = (datasetPath: string) => {
-      const counts = datasetMediaCounts[datasetPath];
-      if (!counts) return 0;
-      if (modelArch?.group === 'audio') return counts.audio;
-      if (modelArch?.group === 'video') return counts.image + counts.video;
-      if (modelArch?.group === 'llm') return counts.image + counts.video + counts.audio;
-      return counts.image;
-    };
+    const poolDatasets = !!jobConfig.config.process[0].train.pool_datasets;
     const effective = datasets.map(dataset => {
-      const count = mediaCount(dataset.folder_path);
-      const repeats = dataset.num_repeats || 1;
+      const count = getMediaCount(
+        datasetMediaCounts[dataset.folder_path],
+        modelArch?.group,
+        datasetUsesVideo(dataset, datasets, poolDatasets),
+      );
+      const repeats = getRepeatCount(dataset);
       const flipMultiplier = (dataset.flip_x ? 2 : 1) * (dataset.flip_y ? 2 : 1);
       return count * repeats * flipMultiplier * getResolutionMultiplier(dataset.resolution);
     });
@@ -117,14 +133,61 @@ export default function SimpleJob({
       const total = totals[dataset.is_reg ? 'regularization' : 'training'];
       return {
         available: datasetMediaCounts[dataset.folder_path] !== undefined,
-        count: mediaCount(dataset.folder_path),
-        repeats: dataset.num_repeats || 1,
+        count: getMediaCount(
+          datasetMediaCounts[dataset.folder_path],
+          modelArch?.group,
+          datasetUsesVideo(dataset, datasets, poolDatasets),
+        ),
+        repeats: getRepeatCount(dataset),
         effective: effective[i],
         percent: total > 0 ? (effective[i] / total) * 100 : 0,
         pool: dataset.is_reg ? 'regularization' : 'training',
       };
     });
-  }, [jobConfig.config.process[0].datasets, datasetMediaCounts, modelArch?.group]);
+  }, [
+    jobConfig.config.process[0].datasets,
+    jobConfig.config.process[0].train.pool_datasets,
+    datasetMediaCounts,
+    modelArch?.group,
+  ]);
+
+  const estimatedEpochImages = useMemo(() => {
+    const datasets = jobConfig.config.process[0].datasets;
+    const poolDatasets = !!jobConfig.config.process[0].train.pool_datasets;
+    let imageCount = 0;
+    let countsAvailable = true;
+    for (const dataset of datasets) {
+      if (dataset.is_reg) continue;
+      if (datasetMediaCounts[dataset.folder_path] === undefined) {
+        countsAvailable = false;
+        continue;
+      }
+      imageCount +=
+        getMediaCount(
+          datasetMediaCounts[dataset.folder_path],
+          modelArch?.group,
+          datasetUsesVideo(dataset, datasets, poolDatasets),
+        ) * getRepeatCount(dataset);
+    }
+    return countsAvailable && imageCount > 0 ? imageCount : null;
+  }, [
+    jobConfig.config.process[0].datasets,
+    jobConfig.config.process[0].train.pool_datasets,
+    datasetMediaCounts,
+    modelArch?.group,
+  ]);
+
+  const saveEveryEpoch = jobConfig.config.process[0].save.save_every_epoch ?? false;
+  const mediaLabel =
+    modelArch?.group === 'audio'
+      ? 'audio files'
+      : modelArch?.group === 'video' || modelArch?.group === 'llm'
+        ? 'media files'
+        : 'images';
+  const epochMediaNoun = estimatedEpochImages === 1 ? mediaLabel.replace(/s$/, '') : mediaLabel;
+  const saveEveryEpochLabel = estimatedEpochImages
+    ? `Save every epoch (~${estimatedEpochImages} ${epochMediaNoun} including repeats)`
+    : 'Save every epoch (media count unavailable)';
 
   const isVideoModel = !!(modelArch?.group === 'video');
   const isAudioModel = !!(modelArch?.group === 'audio');
@@ -736,9 +799,17 @@ export default function SimpleJob({
               placeholder="eg. 250"
               min={1}
               required
+              disabled={saveEveryEpoch}
+            />
+            <Checkbox
+              label={saveEveryEpochLabel}
+              docKey="save.save_every_epoch"
+              className="pt-3"
+              checked={saveEveryEpoch}
+              onChange={value => setJobConfig(value, 'config.process[0].save.save_every_epoch')}
             />
             <NumberInput
-              label="Max Step Saves to Keep"
+              label={saveEveryEpoch ? 'Max Epoch Saves to Keep' : 'Max Step Saves to Keep'}
               value={jobConfig.config.process[0].save.max_step_saves_to_keep}
               onChange={value => setJobConfig(value, 'config.process[0].save.max_step_saves_to_keep')}
               placeholder="eg. 4"
@@ -1338,6 +1409,7 @@ export default function SimpleJob({
                         className="pt-2"
                         onChange={value => setJobConfig(value, `config.process[0].datasets[${i}].num_repeats`)}
                         placeholder="eg. 1"
+                        min={1}
                         docKey={'dataset.num_repeats'}
                       />
                       <NumberInput
